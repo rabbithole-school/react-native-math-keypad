@@ -8,6 +8,8 @@ them on paper. No system keyboard and no WebView. It runs in Expo Go; a
 development build adds two optional iOS modules for hardware keyboards. MIT
 license.
 
+<img src="https://raw.githubusercontent.com/rabbithole-school/react-native-math-keypad/main/docs/keypad.png" alt="The keypad: a child answering 'Write 17/5 as a mixed number' has built 3 2/5 in tappable boxes above a number pad with fraction and exponent keys" width="480">
+
 **Why it exists:** React Native has no maintained math keypad that handles
 fractions and exponents, and the web math editors (MathLive, MathQuill) need
 the DOM, so in React Native they only run inside a WebView.
@@ -101,7 +103,7 @@ Version 0.1.0, released November 2026, and maintained. It comes out of
 [Rabbithole](https://github.com/rabbithole-school/rabbithole), an AI classroom
 app used every school day on 11-inch iPads in Magic Keyboard Folios. Rabbithole's
 iPad app uses this package as its only copy of the keypad, and its web app uses
-the same model. The model and controller have 182 tests. The composed pieces
+the same model. The package has 277 tests. The composed pieces
 (`MathAnswerInput`, `NumberPad`, `StructureKeys`, `PadKey`) and the two Swift
 modules are close adaptations of Rabbithole's practice screen; that screen
 still wraps them in its own code, so they haven't yet run on their own in a
@@ -178,8 +180,8 @@ learning these ideas for the first time:
 - **Only digits and `x` can be typed into a box.** The model itself enforces
   this, so no key handler can get around it. An operator typed as a plain character
   would be invisible to the grammar: `1+2/3` would let the smart `/` grab
-  `1+2` as the numerator and produce `(1+2)/3`. Operators can come in once they
-  are their own kind of item (see Roadmap).
+  `1+2` as the numerator and produce `(1+2)/3`. Operators exist only in the
+  opt-in algebra mode (below), where they are their own kind of item.
 - **The answer is empty until it is complete.** `onChange` reports `""` while
   any box is empty, so a Check button can simply be disabled on an empty
   answer.
@@ -381,6 +383,54 @@ more than once, so be suspicious of any new key handler that reads React state.
 Not done yet: there is no spoken summary of a whole built answer (such as "two
 and one half"), and nobody has tested the pad end to end with VoiceOver.
 
+## Algebra mode
+
+For older learners there is a second grammar, opt-in per answer:
+`createAlgebraTemplateState()` starts a document in which a box holds a free run
+of algebra instead of one value. Without it every rule above is unchanged.
+
+- **What a box can hold:** digits, single-letter variables (any `a`–`z`;
+  upper case is lowered), the constants `i`, `e` and `π`, a decimal point, the
+  operators `+ − × ±`, and the structures: fraction, power, root, and three new
+  ones — a bracket group, `ln( )` and `|…|` (all `GroupItem`, `fn` = `paren`,
+  `ln`, `abs`) and a logarithm with a subscript base box (`LogItem`; an empty
+  base means base 10). Structures nest.
+- **Brackets are a structure,** so they can never be unbalanced: `(` builds a
+  pair with the caret inside, `)` steps out of the nearest enclosing bracket
+  (from however deep inside it the caret is). In a log's base, `(` moves on to
+  the argument, so `log₂(x+1)` is typed log, `2`, `(`, `x+1`.
+- **One minus key.** `-` is subtract or negative by position, as on paper.
+- **`/` grabs the whole term** to its left (back to the nearest `+ − × ±`):
+  `2x/` puts `2x` over the bar, `(x+1)/` puts `x+1` there and drops the
+  brackets. **`^` grabs one operand:** a digit run, one letter, or one
+  structure, so `2x^` raises only the `x`. `expressionTemplateInsertSquare`
+  is an `x²` shortcut that leaves the caret after the power.
+- **Leaving an exponent:** typing `+ − × ±` right after a *simple* exponent
+  (`2`, `n`, `-3`) leaves it on its own, so `x ^ 2 + 3 x` reads as `x² + 3x`.
+  A compound exponent needs brackets: `2^(x+1)`. The right arrow always steps
+  out of whatever box the caret is in.
+- **Backspace** at the start of a bracket, `ln` or `|…|` removes the
+  delimiters and keeps the contents; an empty log disappears.
+- **Incomplete is still `""`:** an empty required box, or a run that ends on an
+  operator (`x+`) or puts two binary operators together, reports `""`.
+- **Serialization is unambiguous rather than minimal:** compound fraction
+  sides, exponents and radicands get brackets; `log_2(x+1)`, `log(100)`,
+  `ln(x)`, `abs(x-3)`, `√(x+1)`, `∛8`, `x^(2/3)`, `(x+3)(x-2)`, `3±2i`; an
+  explicit `*` goes between two numbers, two letters, a letter and a number,
+  and after a power or root (`x^2*y`, `√3*x`). A whole number directly before
+  a simple fraction is still a mixed number (`2 1/2`).
+- **Rendering:** `ExpressionEditor` draws operators with math spacing (a sign
+  sits tight), variables in italic (set `theme.fonts.editorItalic` if your
+  `editor` font is a custom face), brackets and bars that grow with their
+  contents, and `log` with a lowered base box. In algebra mode a box is
+  outlined only while it is empty or the caret is inside its structure.
+
+The composed `MathAnswerInput` does not expose algebra mode yet: an app that
+uses it supplies its own operator and variable keys and calls
+`expressionTemplateApplyKey` and the insert functions above. `flatPad` gained a
+`solutionSet` answer type (comma-separated answers, or `none`) for typing such
+answers flat on a hardware keyboard.
+
 ## Using the model directly
 
 The model is plain TypeScript with no dependencies, so it runs in a test, on a
@@ -410,7 +460,7 @@ package. Only the React Native renderer is in this package.
 npm test
 ```
 
-182 tests, including a fuzzer that types 36,000 random keystrokes across 600
+277 tests (plus 7 pending), including a fuzzer that types 36,000 random keystrokes across 600
 seeded sessions and checks after every key that the caret is valid, the grammar
 holds, only digits and `x` are in the tree, the LaTeX has balanced braces, and
 the answer is non-empty exactly when it is complete. It found a bug ("a power
@@ -423,15 +473,17 @@ predicate or the operation that let it through.
 From the editor's design doc, each with a pending test in
 `src/__tests__/expressionEditorInvariants.test.ts`:
 
-- binary operators (`+ − × ÷ =`) as their own item kind, which would let a box
-  hold `value (operator value)*`
-- subscripts, sums and integrals, matrices, brackets with auto-pairing
+- binary operators in the default grammar (algebra mode has `+ − × ±` and
+  auto-paired brackets; `÷` and `=` are not keys anywhere)
+- subscripts outside a log base, sums and integrals, matrices
 - selection with Shift-arrow, and typing over a selection
 - a nesting depth limit
 
 Other gaps: the hardware-keyboard modules are iOS-only; the components have not
-been run on Android or react-native-web; and the no-towers rule and the up/down
-toggle have not been checked with children.
+been run on Android; on react-native-web they render and take taps (checked in an
+Expo web app for 0.1.1, after 0.1.0 crashed there) but have not been used by
+children; and the no-towers rule and the up/down toggle have not been checked
+with children.
 
 One more lesson from Rabbithole's own testing: in August 2026 a scripted test run
 on the web build tapped the fraction key and then typed, and the digits landed

@@ -21,12 +21,20 @@ import {
   type InputBuffer,
 } from "../model/flatPad";
 
+describe("solution sets typed flat", () => {
+  it("keeps the algebra characters and the comma between answers", () => {
+    expect(sanitizePadInput("solutionSet", "x = 3, -2 ± √5 | none")).toBe("x  3, -2 ± √5 | none");
+    expect(padAcceptsFraction("solutionSet")).toBe(true);
+  });
+});
+
 describe("pad layout", () => {
   it("classifies pad answer types", () => {
     expect(isPadAnswerType("integer")).toBe(true);
     expect(isPadAnswerType("decimal")).toBe(true);
     expect(isPadAnswerType("fraction")).toBe(true);
     expect(isPadAnswerType("expression")).toBe(true);
+    expect(isPadAnswerType("solutionSet")).toBe(true);
     expect(isPadAnswerType("multipleChoice")).toBe(false);
     expect(isPadAnswerType("nonsense")).toBe(false);
   });

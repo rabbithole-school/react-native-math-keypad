@@ -28,7 +28,16 @@ export {
 
 // ── Model: the 2-D builder ──────────────────────────────────────────────────
 export {
+  createAlgebraTemplateState,
   createExpressionTemplateState,
+  expressionTemplateInsertGroup,
+  expressionTemplateInsertLog,
+  expressionTemplateInsertSquare,
+  itemSlots,
+  type ExpressionEditorMode,
+  type GroupFn,
+  type GroupItem,
+  type LogItem,
   expressionTemplateApplyKey,
   expressionTemplateBackspace,
   expressionTemplateInsertEmptyFraction,

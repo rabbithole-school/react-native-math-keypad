@@ -11,13 +11,18 @@
  * (superscript exponents). Code is unchanged; comments were generalized.
  */
 
-/** The four answer kinds a flat pad serves. `expression` here means the
+/** The answer kinds a flat pad serves. `expression` here means the
  *  whole-number-division remainder form ("7 R 2") and other short typed
- *  expressions; genuine fractions, powers and roots use the 2-D builder. */
-export type PadAnswerType = "integer" | "decimal" | "fraction" | "expression";
+ *  expressions; genuine fractions, powers and roots use the 2-D builder.
+ *  `solutionSet` is one or more answers separated by commas (`3,-2`), or the
+ *  word `none`; on a touch screen it is usually built with the algebra-mode
+ *  builder (one box per answer), and typed flat on a hardware keyboard. */
+export type PadAnswerType = "integer" | "decimal" | "fraction" | "expression" | "solutionSet";
 
 export function isPadAnswerType(t: string): t is PadAnswerType {
-  return t === "integer" || t === "decimal" || t === "fraction" || t === "expression";
+  return (
+    t === "integer" || t === "decimal" || t === "fraction" || t === "expression" || t === "solutionSet"
+  );
 }
 
 /** Expression answers (whole-number division) can carry a remainder → an `R` key. */
@@ -44,7 +49,7 @@ export function padShowFraction(t: PadAnswerType): boolean {
  *  hardware-keyboard allowlist (`sanitizePadInput`) lets through and the grid
  *  carries. Integer answers never take a slash. */
 export function padAcceptsFraction(t: PadAnswerType): boolean {
-  return t === "decimal" || t === "fraction" || t === "expression";
+  return t === "decimal" || t === "fraction" || t === "expression" || t === "solutionSet";
 }
 
 /**
@@ -111,17 +116,31 @@ export function applyKeyToInputBuffer(buffer: InputBuffer, key: string): string 
 export function sanitizePadInput(
   answerType: PadAnswerType,
   raw: string,
-  opts?: { allowUnit?: boolean },
+  opts?: {
+    allowUnit?: boolean;
+    /**
+     * Operator characters this one field must keep verbatim, wherever they
+     * sit ("×", "÷", a binary "-"): a field that OFFERS an operator key must
+     * not strip what that key typed on the next edit. The caller passes
+     * exactly the keys it offers; absent ⇒ unchanged.
+     */
+    operators?: readonly string[];
+  },
 ): string {
   const allowUnit = opts?.allowUnit === true;
+  const operators = opts?.operators ?? [];
   let out = "";
   for (const ch of raw) {
-    if (ch >= "0" && ch <= "9") out += ch;
+    if (operators.includes(ch)) out += ch;
+    else if (ch >= "0" && ch <= "9") out += ch;
     else if (ch === "-" && out === "") out += ch;
     else if (ch === "." && answerType === "decimal") out += ch;
     else if (ch === "/" && padAcceptsFraction(answerType)) out += ch;
     else if (answerType === "expression" && (ch === "R" || ch === "r")) out += "R";
     else if (answerType === "expression" && /[A-Za-z()+*^.\s]/.test(ch)) out += ch;
+    // A solution set is typed as algebra: letters, operators, brackets, roots,
+    // ± and the comma between answers.
+    else if (answerType === "solutionSet" && /[A-Za-z()+\-*^.,|±√\s]/.test(ch)) out += ch;
     // The unit tail: letters + spaces + exponent glyphs + the degree sign.
     // Applied AFTER the numeric charset above, so digits/sign/separators keep
     // their exact per-type rules and only the unit vocabulary is added on top.
@@ -196,5 +215,21 @@ export function superscriptExponents(
   text: string | null | undefined,
 ): string | null | undefined {
   if (typeof text !== "string" || text.indexOf("^") === -1) return text;
+  // A LaTeX span (`\( … \)` inline or `\[ … \]` display) is for a math
+  // renderer, where `x^2` must stay a caret: rewrite only the text between spans.
+  if (text.indexOf("\\(") !== -1 || text.indexOf("\\[") !== -1) {
+    return text
+      .split(LATEX_SPAN_RE)
+      .map((part) => (LATEX_SPAN_TEST.test(part) ? part : rewriteExponents(part)))
+      .join("");
+  }
+  return rewriteExponents(text);
+}
+
+// Capturing, so `split` keeps the spans.
+const LATEX_SPAN_RE = /(\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\])/;
+const LATEX_SPAN_TEST = /^(?:\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\])$/;
+
+function rewriteExponents(text: string): string {
   return text.replace(EXPONENT_RE, (_full, base: string, digits: string) => base + toSuperscriptDigits(digits));
 }

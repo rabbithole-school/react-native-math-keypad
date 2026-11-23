@@ -187,7 +187,7 @@ Roughly in order:
 1. **S** – compile and run it: a bare Expo example app, a development build on
    an iPad simulator and a real iPad with a keyboard case, fix what breaks.
 2. **S** – packaging: build `lib/` with react-native-builder-bob or `tsc`,
-   ship types, narrow the peer ranges, CI that runs the 182 tests and a
+   ship types, narrow the peer ranges, CI that runs the 277 tests and a
    typecheck.
 3. **S** – screenshots and a short video for the README; an npm name (
    `react-native-math-keypad` was free on npm on 2026-11-20).

@@ -85,4 +85,10 @@ describe("superscriptExponents", () => {
     // convert yet; this must not throw or drop the caret.
     expect(superscriptExponents("112 cm^")).toBe("112 cm^");
   });
+
+  it("leaves LaTeX \\( … \\) and \\[ … \\] spans alone and rewrites the text around them", () => {
+    expect(superscriptExponents("Since 2^3 = 8, solve \\(x^2 = 4\\) and \\[y^10\\]")).toBe(
+      "Since 2³ = 8, solve \\(x^2 = 4\\) and \\[y^10\\]",
+    );
+  });
 });

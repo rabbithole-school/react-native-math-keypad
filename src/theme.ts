@@ -39,6 +39,10 @@ export type MathKeypadTheme = {
     /** Editor digits. Undefined = system font at weight 500. If you set a
      *  custom face, check `EXPR_DIGIT_ADVANCE_EM` (see boxMetrics.ts). */
     editor?: string;
+    /** Algebra-mode variables (`x`, `y`, `i`). A custom `editor` face needs
+     *  its real italic face named here: iOS draws a custom family upright for
+     *  `fontStyle: "italic"`. Undefined = `editor` with `fontStyle: "italic"`. */
+    editorItalic?: string;
     /** Hint line. Undefined = system font. */
     hint?: string;
   };

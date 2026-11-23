@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  createAlgebraTemplateState,
   createExpressionTemplateState,
+  expressionTemplateInsertGroup,
+  expressionTemplateInsertLog,
+  expressionTemplateInsertSquare,
   expressionTemplateApplyKey,
   expressionTemplateBackspace,
   expressionTemplateInsertExponent,
@@ -773,3 +777,282 @@ function otherEmpty(state: ExpressionTemplateState, notId: string): string {
   }
   throw new Error("no other empty slot");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALGEBRA MODE — key sequences → model → the plain answer string.
+// Keys are applyKey keys; `{…}` names an on-screen structural key; arrows are
+// the caret keys.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function algebraKey(state: ExpressionTemplateState, key: string): ExpressionTemplateState {
+  switch (key) {
+    case "{frac}":
+      return expressionTemplateInsertEmptyFraction(state);
+    case "{pow}":
+      return expressionTemplateInsertExponent(state);
+    case "{sq}":
+      return expressionTemplateInsertSquare(state);
+    case "{sqrt}":
+      return expressionTemplateInsertSquareRoot(state);
+    case "{root}":
+      return expressionTemplateInsertRoot(state);
+    case "{log}":
+      return expressionTemplateInsertLog(state);
+    case "{ln}":
+      return expressionTemplateInsertGroup(state, "ln");
+    case "{abs}":
+      return expressionTemplateInsertGroup(state, "abs");
+    case "→":
+      return expressionTemplateApplyKey(state, "ArrowRight");
+    case "←":
+      return expressionTemplateApplyKey(state, "ArrowLeft");
+    case "↓":
+      return expressionTemplateApplyKey(state, "ArrowDown");
+    case "↑":
+      return expressionTemplateApplyKey(state, "ArrowUp");
+    default:
+      return expressionTemplateApplyKey(state, key);
+  }
+}
+
+/** Split a script into keys: `{name}` groups stay whole, every other character
+ *  is its own key. Spaces are ignored. */
+function keysOf(script: string): string[] {
+  return script.match(/\{[a-z]+\}|\S/gu) ?? [];
+}
+
+function typeAlgebra(script: string, start = createAlgebraTemplateState()): ExpressionTemplateState {
+  return keysOf(script).reduce(algebraKey, start);
+}
+
+describe("algebra mode: key sequences serialize to the answer grammar", () => {
+  const cases: Array<[string, string]> = [
+    ["(x+3)(x-2)", "(x+3)(x-2)"],
+    ["3+2i", "3+2i"],
+    ["x^2/3", "x^(2/3)"],
+    ["x{pow}{frac}1↓3", "x^(1/3)"],
+    ["{log}2(x+1", "log_2(x+1)"],
+    ["{log}2(x+1)", "log_2(x+1)"],
+    ["(x+1)/x-2", "(x+1)/(x-2)"],
+    ["2{sqrt}3", "2√3"],
+    ["-1/2", "-1/2"],
+    ["2±3i", "2±3i"],
+    ["x{sq}+3x-4", "x^2+3x-4"],
+    ["x^2+1", "x^2+1"],
+    ["2^(x+1)", "2^(x+1)"],
+    ["e^2x", "e^(2x)"],
+    ["{ln}x", "ln(x)"],
+    ["{log}→100", "log(100)"],
+    ["{log}(100", "log(100)"],
+    ["x^-2", "x^(-2)"],
+    ["{sqrt}x+1", "√(x+1)"],
+    ["{root}3→8", "∛8"],
+    ["{root}4→x", "√[4](x)"],
+    ["{sqrt}x", "√(x)"],
+    ["{sqrt}(x+1", "√(x+1)"],
+    ["|x-3|", "abs(x-3)"],
+    ["{abs}x-3", "abs(x-3)"],
+    ["2(x+1)", "2(x+1)"],
+    ["x(x+1)", "x(x+1)"],
+    ["(x+1)^2", "(x+1)^2"],
+    ["(x+1){sq}", "(x+1)^2"],
+    ["3x^2", "3x^2"],
+    ["x^2→y", "x^2*y"],
+    ["1/x", "1/x"],
+    ["2/3x", "2/(3x)"],
+    ["(2x+1)/3", "(2x+1)/3"],
+    ["5e^-0.2t", "5e^(-0.2t)"],
+    ["n{sq}+1", "n^2+1"],
+    ["2^n", "2^n"],
+    ["3(2)^(n-1)", "3(2)^(n-1)"],
+    ["i", "i"],
+    ["-i", "-i"],
+    ["{log}x(8", "log_x(8)"],
+    ["2x^2-8x+6", "2x^2-8x+6"],
+    ["π", "π"],
+    ["2π", "2π"],
+    ["x*y", "x*y"],
+    ["x×y", "x*y"],
+    ["xy", "x*y"],
+    ["2{frac}1↓2", "2 1/2"],
+    ["{sqrt}3→x", "√3*x"],
+    ["{sqrt}2→/2", "(√2)/2"],
+    ["1/(x-1)", "1/(x-1)"],
+    ["x^(1/2)", "x^(1/2)"],
+    ["4-x{sq}", "4-x^2"],
+    ["X+Y", "x+y"],
+    ["x−3", "x-3"],
+    ["(x-2)(x+2)(x-1)", "(x-2)(x+2)(x-1)"],
+    ["-3±{sqrt}5", "-3±√5"],
+    ["(1+{sqrt}2)/2", "(1+√2)/2"],
+  ];
+  it.each(cases)("%s → %s", (script, expected) => {
+    expect(expressionTemplateToSubmission(typeAlgebra(script))).toBe(expected);
+  });
+
+  it("covers at least forty distinct answers", () => {
+    expect(new Set(cases.map(([, e]) => e)).size).toBeGreaterThanOrEqual(40);
+  });
+});
+
+describe("algebra mode: structure and caret", () => {
+  it("( builds a bracket group with the caret inside; ) steps out of it", () => {
+    let s = typeAlgebra("(x");
+    expect(s.root.items).toHaveLength(1);
+    expect(s.root.items[0].kind).toBe("group");
+    expect(s.activeSlotId).not.toBe("slot_0");
+    s = algebraKey(s, ")");
+    expect(s.activeSlotId).toBe("slot_0");
+    expect(s.caretIndex).toBe(1);
+  });
+
+  it(") with no enclosing bracket is a no-op", () => {
+    const s = typeAlgebra("x");
+    expect(algebraKey(s, ")")).toBe(s);
+  });
+
+  it(") steps out of a bracket from inside a nested exponent", () => {
+    const s = typeAlgebra("(x^(2");
+    const out = typeAlgebra("))", s);
+    expect(out.activeSlotId).toBe("slot_0");
+    expect(expressionTemplateToSubmission(out)).toBe("(x^(2))");
+  });
+
+  it("→ at the end of every structure steps back onto the line", () => {
+    for (const open of ["x{pow}2", "{frac}1↓2", "{sqrt}2", "{log}2(8", "{ln}x", "{abs}x", "(x"]) {
+      const s = algebraKey(typeAlgebra(open), "→");
+      expect(s.activeSlotId).toBe("slot_0");
+      expect(s.caretIndex).toBe(1);
+    }
+  });
+
+  it("← from just after a structure walks back into its last box", () => {
+    for (const open of ["x{pow}2→", "{sqrt}2→", "{log}2(8)", "{ln}x→", "(x)", "{frac}1↓2→"]) {
+      const s = algebraKey(typeAlgebra(open), "←");
+      expect(s.activeSlotId).not.toBe("slot_0");
+    }
+  });
+
+  it("a simple exponent ends when an operator is typed; a compound one does not", () => {
+    expect(expressionTemplateToSubmission(typeAlgebra("x^n-1"))).toBe("x^n-1");
+    expect(expressionTemplateToSubmission(typeAlgebra("x^(n-1)"))).toBe("x^(n-1)");
+    expect(expressionTemplateToSubmission(typeAlgebra("x^2x+1"))).toBe("x^(2x+1)");
+  });
+
+  it("^ right after a power re-enters its exponent instead of stacking a tower", () => {
+    const s = typeAlgebra("x{sq}^");
+    expect(s.activeSlotId).not.toBe("slot_0");
+    expect(expressionTemplateToSubmission(typeAlgebra("x{sq}^0"))).toBe("x^20");
+  });
+
+  it("x² with nothing to square opens the base box with the 2 in place", () => {
+    const s = typeAlgebra("{sq}");
+    expect(s.activeSlotId).not.toBe("slot_0");
+    expect(expressionTemplateToSubmission(typeAlgebra("{sq}y"))).toBe("y^2");
+  });
+
+  it("a log base may stay empty (base 10), and ↑/↓ move between base and argument", () => {
+    let s = typeAlgebra("{log}");
+    const base = s.activeSlotId;
+    s = algebraKey(s, "↑");
+    expect(s.activeSlotId).not.toBe(base);
+    s = algebraKey(s, "↓");
+    expect(s.activeSlotId).toBe(base);
+  });
+
+  it("a root's index box takes digits only", () => {
+    const s = typeAlgebra("{root}");
+    expect(algebraKey(s, "x")).toBe(s);
+    expect(algebraKey(s, "+")).toBe(s);
+  });
+
+  it("refuses characters the grammar cannot hold", () => {
+    const s = typeAlgebra("x");
+    for (const c of ["=", "$", "#", "&", "!", ",", ";"]) expect(algebraKey(s, c)).toBe(s);
+  });
+
+  it("÷ builds a fraction like /", () => {
+    expect(expressionTemplateToSubmission(typeAlgebra("6÷4"))).toBe("6/4");
+  });
+});
+
+describe("algebra mode: backspace through structures", () => {
+  it("deletes characters, steps into a structure on its right edge, and unwraps a bracket at its start", () => {
+    let s = typeAlgebra("(x+1)");
+    s = algebraKey(s, "⌫"); // into the bracket, caret after 1
+    expect(s.activeSlotId).not.toBe("slot_0");
+    s = algebraKey(s, "⌫"); // deletes 1
+    s = typeAlgebra("←←", s); // caret before x
+    s = algebraKey(s, "⌫"); // unwraps: the brackets go, x+ stays
+    expect(s.activeSlotId).toBe("slot_0");
+    expect(s.root.items.map((it) => (it.kind === "token" ? it.value : it.kind))).toEqual(["x", "+"]);
+  });
+
+  it("removes an empty log, ln, |…|, bracket, fraction or root, and undoes an empty exponent", () => {
+    for (const open of ["{log}", "{ln}", "{frac}", "{abs}", "(", "{sqrt}"]) {
+      const s = algebraKey(typeAlgebra(open), "⌫");
+      expect(s.root.items).toHaveLength(0);
+      expect(s.activeSlotId).toBe("slot_0");
+    }
+    const undone = algebraKey(typeAlgebra("x^"), "⌫");
+    expect(expressionTemplateToSubmission(undone)).toBe("x");
+  });
+
+  it("backspace from the end empties a whole log without ever losing the caret", () => {
+    let s = typeAlgebra("{log}2(8)");
+    for (let i = 0; i < 12 && s.root.items.length > 0; i++) {
+      s = algebraKey(s, "⌫");
+    }
+    expect(s.root.items).toHaveLength(0);
+    expect(s.activeSlotId).toBe("slot_0");
+  });
+});
+
+describe("algebra mode: Check stays off for a visibly unfinished answer", () => {
+  it.each(["x+", "+x", "x+*2", "(", "x^", "{log}", "{log}2", "{frac}1", "{sqrt}", "-"])(
+    "%s is incomplete",
+    (script) => {
+      const s = typeAlgebra(script);
+      expect(expressionTemplateIsComplete(s)).toBe(false);
+      expect(expressionTemplateToSubmission(s)).toBe("");
+    },
+  );
+
+  it.each(["x*-2", "-x", "±3", "3±-1", "{log}→8"])("%s is complete", (script) => {
+    expect(expressionTemplateIsComplete(typeAlgebra(script))).toBe(true);
+  });
+});
+
+describe("algebra mode: LaTeX preview", () => {
+  it("renders the new structures", () => {
+    expect(expressionTemplateToLatex(typeAlgebra("{log}2(x"))).toBe("\\log_{2}\\left(x\\right)");
+    expect(expressionTemplateToLatex(typeAlgebra("{abs}x"))).toBe("\\left|x\\right|");
+    expect(expressionTemplateToLatex(typeAlgebra("{ln}x"))).toBe("\\ln\\left(x\\right)");
+    expect(expressionTemplateToLatex(typeAlgebra("2±x×y"))).toBe("2\\pm x\\times y");
+  });
+});
+
+describe("constrained mode is untouched by algebra mode", () => {
+  it("still refuses operators, letters other than x, and brackets", () => {
+    const s = createExpressionTemplateState("");
+    for (const c of ["+", "-", "*", "(", ")", "y", "i", "|", "÷"]) {
+      expect(expressionTemplateApplyKey(s, c)).toBe(s);
+    }
+  });
+
+  it("the algebra-only ops are no-ops outside algebra mode", () => {
+    const s = createExpressionTemplateState("2");
+    expect(expressionTemplateInsertSquare(s)).toBe(s);
+    expect(expressionTemplateInsertLog(s)).toBe(s);
+    expect(expressionTemplateInsertGroup(s, "paren")).toBe(s);
+  });
+
+  it("still serializes a mixed number the old way", () => {
+    let s = createExpressionTemplateState("2");
+    s = expressionTemplateInsertEmptyFraction(s);
+    s = typeInto(s, "1");
+    s = expressionTemplateMoveDown(s);
+    s = typeInto(s, "2");
+    expect(expressionTemplateToSubmission(s)).toBe("2 1/2");
+  });
+});

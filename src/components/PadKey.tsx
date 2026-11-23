@@ -4,12 +4,12 @@ import {
   Animated,
   Pressable,
   Text,
-  useAnimatedValue,
   type StyleProp,
   type ViewStyle,
 } from "react-native";
 
 import type { KeyStyles } from "./keyStyles";
+import { useStableAnimatedValue } from "./useStableAnimatedValue";
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -77,7 +77,7 @@ export function PadKey({
   children?: ReactNode;
   onPress: () => void;
 }) {
-  const scale = useAnimatedValue(1);
+  const scale = useStableAnimatedValue(1);
   const reduceMotion = useReduceMotion();
   const a11yLabel = hidden ? undefined : (accessibilityLabel ?? padKeyLabel(label));
   const face = children ?? <Text style={styles.padKeyText}>{label}</Text>;

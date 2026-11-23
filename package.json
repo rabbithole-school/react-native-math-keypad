@@ -1,6 +1,6 @@
 {
   "name": "react-native-math-keypad",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "On-screen math keypad for React Native and Expo. Kids enter fractions, mixed numbers, exponents and roots in tappable answer boxes, without the system keyboard. Built for iPad.",
   "license": "MIT",
   "author": "The Rabbithole authors",

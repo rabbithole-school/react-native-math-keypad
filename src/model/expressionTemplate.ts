@@ -15,10 +15,30 @@ export type PowerItem = { kind: "power"; base: Slot; exponent: Slot };
 /** An implicit square root has no index slot; an indexed root has an editable
  * integer index slot whose blank value deliberately means 2. */
 export type RootItem = { kind: "root"; index: Slot | null; radicand: Slot };
-export type Item = TokenItem | FractionItem | PowerItem | RootItem;
+/** ALGEBRA mode only: a logarithm with a subscript base box and an argument box.
+ *  An empty base means base 10 (`log(…)`). */
+export type LogItem = { kind: "log"; base: Slot; argument: Slot };
+/** ALGEBRA mode only: one box wrapped by a pair of delimiters. `paren` is a
+ *  bracketed group (typing `(` builds it, so brackets can never be unbalanced),
+ *  `ln` a natural log, `abs` an absolute value drawn as bars. */
+export type GroupFn = "paren" | "ln" | "abs";
+export type GroupItem = { kind: "group"; fn: GroupFn; inner: Slot };
+export type Item = TokenItem | FractionItem | PowerItem | RootItem | LogItem | GroupItem;
 export type Slot = { id: SlotId; items: Item[] };
 
+/**
+ * `"algebra"` widens the editor from "one number per box" to a free run of
+ * algebra in every box: digits, single-letter variables, the constants i, e and
+ * π, the operators + − × ±, bracketed groups, and log/ln/abs on top of the
+ * fraction/power/root structures. The caller opts in per answer
+ * (`createAlgebraTemplateState`); absent, every op below behaves exactly as
+ * it always has.
+ */
+export type ExpressionEditorMode = "algebra";
+
 export type ExpressionTemplateState = {
+  /** See `ExpressionEditorMode`. Absent ⇒ the constrained number-pad grammar. */
+  mode?: ExpressionEditorMode;
   root: Slot;
   activeSlotId: SlotId;
   /** The insertion bar's position WITHIN the active slot's item list: 0..items.length.
@@ -43,74 +63,64 @@ function newSlot(state: ExpressionTemplateState): Slot {
   return { id, items: [] };
 }
 
+/** A structure's boxes in VISUAL order (left-to-right, top-to-bottom). Every
+ *  tree walk below goes through this one table, so a new structure kind is
+ *  wired into focus order, caret walking, cloning and lookup in one place. */
+export function itemSlots(item: Item): Slot[] {
+  switch (item.kind) {
+    case "token":
+      return [];
+    case "fraction":
+      return [item.numerator, item.denominator];
+    case "power":
+      return [item.base, item.exponent];
+    case "root":
+      return item.index ? [item.index, item.radicand] : [item.radicand];
+    case "log":
+      return [item.base, item.argument];
+    case "group":
+      return [item.inner];
+  }
+}
+
+/** Rebuild a structure with each of its boxes passed through `f`. */
+function mapItemSlots(item: Item, f: (slot: Slot) => Slot): Item {
+  switch (item.kind) {
+    case "token":
+      return item;
+    case "fraction":
+      return { kind: "fraction", numerator: f(item.numerator), denominator: f(item.denominator) };
+    case "power":
+      return { kind: "power", base: f(item.base), exponent: f(item.exponent) };
+    case "root":
+      return { kind: "root", index: item.index ? f(item.index) : null, radicand: f(item.radicand) };
+    case "log":
+      return { kind: "log", base: f(item.base), argument: f(item.argument) };
+    case "group":
+      return { kind: "group", fn: item.fn, inner: f(item.inner) };
+  }
+}
+
+function cloneItem(item: Item): Item {
+  return item.kind === "token" ? { ...item } : mapItemSlots(item, cloneSlot);
+}
+
 function cloneSlot(slot: Slot): Slot {
-  return {
-    id: slot.id,
-    items: slot.items.map((item) => {
-      if (item.kind === "token") return { ...item };
-      if (item.kind === "fraction") {
-        return {
-          kind: "fraction",
-          numerator: cloneSlot(item.numerator),
-          denominator: cloneSlot(item.denominator),
-        };
-      }
-      if (item.kind === "root") {
-        return {
-          kind: "root",
-          index: item.index ? cloneSlot(item.index) : null,
-          radicand: cloneSlot(item.radicand),
-        };
-      }
-      return {
-        kind: "power",
-        base: cloneSlot(item.base),
-        exponent: cloneSlot(item.exponent),
-      };
-    }),
-  };
+  return { id: slot.id, items: slot.items.map(cloneItem) };
 }
 
 function mapSlot(slot: Slot, slotId: string, updater: (slot: Slot) => Slot): Slot {
   if (slot.id === slotId) return updater(slot);
   return {
     ...slot,
-    items: slot.items.map((item) => {
-      if (item.kind === "token") return item;
-      if (item.kind === "fraction") {
-        return {
-          kind: "fraction",
-          numerator: mapSlot(item.numerator, slotId, updater),
-          denominator: mapSlot(item.denominator, slotId, updater),
-        };
-      }
-      if (item.kind === "root") {
-        return {
-          kind: "root",
-          index: item.index ? mapSlot(item.index, slotId, updater) : null,
-          radicand: mapSlot(item.radicand, slotId, updater),
-        };
-      }
-      return {
-        kind: "power",
-        base: mapSlot(item.base, slotId, updater),
-        exponent: mapSlot(item.exponent, slotId, updater),
-      };
-    }),
+    items: slot.items.map((item) => mapItemSlots(item, (child) => mapSlot(child, slotId, updater))),
   };
 }
 
 function flattenSlots(slot: Slot): SlotId[] {
   const out: SlotId[] = [slot.id];
   for (const item of slot.items) {
-    if (item.kind === "fraction") {
-      out.push(...flattenSlots(item.numerator), ...flattenSlots(item.denominator));
-    } else if (item.kind === "root") {
-      if (item.index) out.push(...flattenSlots(item.index));
-      out.push(...flattenSlots(item.radicand));
-    } else if (item.kind === "power") {
-      out.push(...flattenSlots(item.base), ...flattenSlots(item.exponent));
-    }
+    for (const child of itemSlots(item)) out.push(...flattenSlots(child));
   }
   return out;
 }
@@ -143,6 +153,9 @@ function itemToExpr(item: Item): string {
     if (!index || !radicand) return "";
     return `${rootSymbol(index)}${wrapIfCompound(radicand)}`;
   }
+  // log / group exist only in algebra mode, whose serializer is
+  // `algebraSlotToExpr`; reaching here would mean a mixed document.
+  if (item.kind === "log" || item.kind === "group") return algebraItemToExpr(item);
   const base = slotToExpr(item.base);
   const exponent = slotToExpr(item.exponent);
   if (!base || !exponent) return "";
@@ -202,8 +215,23 @@ function trailingRunIsWhole(slot: Slot, before: number): boolean {
   return sawDigit && i < 0;
 }
 
+const TOKEN_LATEX: Record<string, string> = {
+  "*": "\\times ",
+  "±": "\\pm ",
+  "π": "\\pi ",
+};
+
 function itemToLatex(item: Item): string {
-  if (item.kind === "token") return escapeLatexText(item.value);
+  if (item.kind === "token") return TOKEN_LATEX[item.value] ?? escapeLatexText(item.value);
+  if (item.kind === "log") {
+    const base = item.base.items.length > 0 ? `_{${slotToLatex(item.base)}}` : "";
+    return `\\log${base}\\left(${slotToLatex(item.argument)}\\right)`;
+  }
+  if (item.kind === "group") {
+    const inner = slotToLatex(item.inner);
+    if (item.fn === "abs") return `\\left|${inner}\\right|`;
+    return `${item.fn === "ln" ? "\\ln" : ""}\\left(${inner}\\right)`;
+  }
   if (item.kind === "fraction") {
     const num = slotToLatex(item.numerator);
     const den = slotToLatex(item.denominator);
@@ -241,6 +269,10 @@ function slotHasHoles(slot: Slot): boolean {
       if (!rootIndexValue(item) || slotHasHoles(item.radicand)) return true;
       continue;
     }
+    if (item.kind === "log" || item.kind === "group") {
+      if (algebraSlotHasHoles({ id: "", items: [item] })) return true;
+      continue;
+    }
     if (slotHasHoles(item.base) || slotHasHoles(item.exponent)) return true;
   }
   return false;
@@ -265,6 +297,11 @@ export function createExpressionTemplateState(raw = ""): ExpressionTemplateState
     caretIndex: items.length,
     nextId: 1,
   };
+}
+
+/** An empty ALGEBRA-mode document (see `ExpressionEditorMode`). */
+export function createAlgebraTemplateState(): ExpressionTemplateState {
+  return { mode: "algebra", root: { id: "slot_0", items: [] }, activeSlotId: "slot_0", caretIndex: 0, nextId: 1 };
 }
 
 /** Clamp a caret index into a slot's valid range. */
@@ -319,7 +356,7 @@ function isInsertableChar(c: string): boolean {
 function slotGrammarValid(items: Item[]): boolean {
   let structureCount = 0;
   let structureIndex = -1;
-  let structureKind: "fraction" | "power" | "root" | null = null;
+  let structureKind: Exclude<Item["kind"], "token"> | null = null;
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
     if (it.kind === "token") continue;
@@ -339,6 +376,11 @@ export function expressionTemplateInsertToken(
   prev: ExpressionTemplateState,
   token: string,
 ): ExpressionTemplateState {
+  if (prev.mode === "algebra") {
+    let state = prev;
+    for (const c of token) state = algebraInsertChar(state, c);
+    return state;
+  }
   const active = findSlot(prev.root, prev.activeSlotId);
   if (!active) return prev;
   // Defense-in-depth for locked scaffolds: never write a token into a container
@@ -407,6 +449,7 @@ function trailingTokenRun(slot: Slot, caretIndex: number): { items: Item[]; star
 export function expressionTemplateInsertFraction(
   prev: ExpressionTemplateState,
 ): ExpressionTemplateState {
+  if (prev.mode === "algebra") return algebraInsertFraction(prev, true);
   return insertStructure(prev, "fraction", true);
 }
 
@@ -419,6 +462,7 @@ export function expressionTemplateInsertFraction(
 export function expressionTemplateInsertExponent(
   prev: ExpressionTemplateState,
 ): ExpressionTemplateState {
+  if (prev.mode === "algebra") return algebraInsertPower(prev, null);
   if (!prev.structureLocked) {
     const parent = findSlotParent(prev.root, prev.activeSlotId);
     if (parent && parent.item.kind === "power" && parent.role === "base") {
@@ -435,12 +479,14 @@ export function expressionTemplateInsertExponent(
 export function expressionTemplateInsertEmptyFraction(
   prev: ExpressionTemplateState,
 ): ExpressionTemplateState {
+  if (prev.mode === "algebra") return algebraInsertFraction(prev, false);
   return insertStructure(prev, "fraction", false);
 }
 
 /** Insert an empty n-th root at the caret. The index receives focus first; a
  * preceding digit run remains a coefficient rather than being captured. */
 export function expressionTemplateInsertRoot(prev: ExpressionTemplateState): ExpressionTemplateState {
+  if (prev.mode === "algebra") return algebraInsertRoot(prev, "explicit");
   return insertStructure(prev, "root", false, "explicit");
 }
 
@@ -449,7 +495,39 @@ export function expressionTemplateInsertRoot(prev: ExpressionTemplateState): Exp
 export function expressionTemplateInsertSquareRoot(
   prev: ExpressionTemplateState,
 ): ExpressionTemplateState {
+  if (prev.mode === "algebra") return algebraInsertRoot(prev, "implicit");
   return insertStructure(prev, "root", false, "implicit");
+}
+
+/** ALGEBRA: the `x²` shortcut — square the operand left of the caret and leave
+ *  the caret AFTER the power, so `x`, `x²`, `+` reads exactly as it is written.
+ *  With nothing to square, the base box opens with the 2 already in place. */
+export function expressionTemplateInsertSquare(prev: ExpressionTemplateState): ExpressionTemplateState {
+  if (prev.mode !== "algebra") return prev;
+  return algebraInsertPower(prev, "2");
+}
+
+/** ALGEBRA: a logarithm. The caret lands in the base box; leaving it empty means
+ *  base 10, and `→` or `(` moves on to the argument. */
+export function expressionTemplateInsertLog(prev: ExpressionTemplateState): ExpressionTemplateState {
+  if (prev.mode !== "algebra") return prev;
+  return algebraInsertBuilt(prev, "none", (state) => {
+    const base = newSlot(state);
+    const argument = newSlot(state);
+    return { item: { kind: "log", base, argument }, focus: base };
+  });
+}
+
+/** ALGEBRA: `ln(▢)`, `|▢|` or a bracketed `(▢)` with the caret inside. */
+export function expressionTemplateInsertGroup(
+  prev: ExpressionTemplateState,
+  fn: GroupFn,
+): ExpressionTemplateState {
+  if (prev.mode !== "algebra") return prev;
+  return algebraInsertBuilt(prev, "none", (state) => {
+    const inner = newSlot(state);
+    return { item: { kind: "group", fn, inner }, focus: inner };
+  });
 }
 
 function insertStructure(
@@ -526,13 +604,35 @@ export function expressionTemplateBackspace(
     // backspace edits inside it (never silently nuking a whole fraction). Locked
     // scaffolds fall through to a plain step-back.
     if (!prev.structureLocked) {
-      const inner =
-        left.kind === "fraction"
-          ? left.denominator
-          : left.kind === "root"
-            ? left.radicand
-            : (left as PowerItem).exponent;
+      // The structure's LAST box: a fraction's denominator, a power's exponent,
+      // a root's radicand, a log's argument, a group's inside.
+      const boxes = itemSlots(left);
+      const inner = boxes[boxes.length - 1];
       return { ...prev, activeSlotId: inner.id, caretIndex: inner.items.length };
+    }
+  }
+
+  // ALGEBRA: backspace at the very start of a bracket / ln / |…| box removes the
+  // delimiters and keeps what was inside, the way deleting "(" would on paper.
+  if (prev.mode === "algebra" && prev.caretIndex === 0) {
+    const parent = findSlotParent(prev.root, prev.activeSlotId);
+    if (parent?.item.kind === "group") {
+      const state = { ...prev, root: cloneSlot(prev.root) };
+      state.root = spliceItemsAt(state.root, parent.container.id, parent.index, active.items.map(cloneItem));
+      state.activeSlotId = parent.container.id;
+      state.caretIndex = parent.index;
+      return state;
+    }
+    if (
+      parent?.item.kind === "log" &&
+      parent.item.base.items.length === 0 &&
+      parent.item.argument.items.length === 0
+    ) {
+      const state = { ...prev, root: cloneSlot(prev.root) };
+      state.root = removeItemAt(state.root, parent.container.id, parent.index);
+      state.activeSlotId = parent.container.id;
+      state.caretIndex = parent.index;
+      return state;
     }
   }
 
@@ -689,17 +789,7 @@ function caretPositions(state: ExpressionTemplateState): CaretPos[] {
     const focusable = slotIsFocusable(slot, state.structureLocked);
     if (focusable) out.push({ slotId: slot.id, index: 0 });
     for (let i = 0; i < slot.items.length; i++) {
-      const item = slot.items[i];
-      if (item.kind === "fraction") {
-        walk(item.numerator);
-        walk(item.denominator);
-      } else if (item.kind === "root") {
-        if (item.index) walk(item.index);
-        walk(item.radicand);
-      } else if (item.kind === "power") {
-        walk(item.base);
-        walk(item.exponent);
-      }
+      for (const child of itemSlots(slot.items[i])) walk(child);
       if (focusable) out.push({ slotId: slot.id, index: i + 1 });
     }
   };
@@ -752,6 +842,10 @@ export function expressionTemplateMoveDown(
   if (parent && parent.item.kind === "root" && parent.role === "index") {
     return expressionTemplateSetActiveSlot(prev, parent.item.radicand.id);
   }
+  // A log's base is a SUBSCRIPT: down from the argument drops into it.
+  if (parent && parent.item.kind === "log" && parent.role === "argument") {
+    return expressionTemplateSetActiveSlot(prev, parent.item.base.id);
+  }
   return prev;
 }
 
@@ -760,6 +854,9 @@ export function expressionTemplateMoveUp(
   prev: ExpressionTemplateState,
 ): ExpressionTemplateState {
   const parent = findSlotParent(prev.root, prev.activeSlotId);
+  if (parent && parent.item.kind === "log" && parent.role === "base") {
+    return expressionTemplateSetActiveSlot(prev, parent.item.argument.id);
+  }
   if (parent && parent.item.kind === "fraction" && parent.role === "denominator") {
     return expressionTemplateSetActiveSlot(prev, parent.item.numerator.id);
   }
@@ -819,6 +916,8 @@ export function expressionTemplateApplyKey(
       return expressionTemplateBackspace(prev);
     case "/":
       return expressionTemplateInsertFraction(prev);
+    case "÷":
+      return prev.mode === "algebra" ? expressionTemplateInsertFraction(prev) : expressionTemplateInsertToken(prev, key);
     case "^":
       return expressionTemplateInsertExponent(prev);
     case "Tab":
@@ -839,6 +938,7 @@ export function expressionTemplateApplyKey(
 }
 
 export function expressionTemplateIsComplete(state: ExpressionTemplateState): boolean {
+  if (state.mode === "algebra") return !algebraSlotHasHoles(state.root);
   return !slotHasHoles(state.root);
 }
 
@@ -846,6 +946,7 @@ export function expressionTemplateToSubmission(
   state: ExpressionTemplateState,
 ): string {
   if (!expressionTemplateIsComplete(state)) return "";
+  if (state.mode === "algebra") return algebraSlotToExpr(state.root);
   return slotToExpr(state.root);
 }
 
@@ -861,14 +962,11 @@ function findSlot(slot: Slot, id: SlotId): Slot | null {
 }
 
 function findSlotInItem(item: Item, id: SlotId): Slot | null {
-  if (item.kind === "token") return null;
-  if (item.kind === "fraction") {
-    return findSlot(item.numerator, id) ?? findSlot(item.denominator, id);
+  for (const child of itemSlots(item)) {
+    const found = findSlot(child, id);
+    if (found) return found;
   }
-  if (item.kind === "root") {
-    return (item.index ? findSlot(item.index, id) : null) ?? findSlot(item.radicand, id);
-  }
-  return findSlot(item.base, id) ?? findSlot(item.exponent, id);
+  return null;
 }
 
 /** Where a given slot sits in the tree: the structural item that owns it, the
@@ -876,49 +974,69 @@ function findSlotInItem(item: Item, id: SlotId): Slot | null {
  *  (numerator / denominator / base / exponent / root index / radicand). Powers `↑`/`↓` nav and the
  *  backspace unwrap. A power's base is now a real Slot (like its exponent), so
  *  every box — including a power base — is reachable by arrow-nav and unwrap. */
+type SlotRole =
+  | "numerator"
+  | "denominator"
+  | "exponent"
+  | "base"
+  | "index"
+  | "radicand"
+  | "argument"
+  | "inner";
+
 type SlotParentRef = {
   container: Slot;
   index: number;
-  item: FractionItem | PowerItem | RootItem;
-  role: "numerator" | "denominator" | "exponent" | "base" | "index" | "radicand";
+  item: FractionItem | PowerItem | RootItem | LogItem | GroupItem;
+  role: SlotRole;
 };
+
+/** The role each of a structure's boxes plays (a log's base shares the power
+ *  base's role name; callers always check the item kind alongside the role). */
+function slotRoles(item: Exclude<Item, TokenItem>): Array<[Slot, SlotRole]> {
+  switch (item.kind) {
+    case "fraction":
+      return [[item.numerator, "numerator"], [item.denominator, "denominator"]];
+    case "power":
+      return [[item.base, "base"], [item.exponent, "exponent"]];
+    case "root":
+      return item.index ? [[item.index, "index"], [item.radicand, "radicand"]] : [[item.radicand, "radicand"]];
+    case "log":
+      return [[item.base, "base"], [item.argument, "argument"]];
+    case "group":
+      return [[item.inner, "inner"]];
+  }
+}
 
 function findSlotParent(root: Slot, activeId: SlotId): SlotParentRef | null {
   const walk = (slot: Slot): SlotParentRef | null => {
     for (let i = 0; i < slot.items.length; i++) {
       const item = slot.items[i];
-      if (item.kind === "fraction") {
-        if (item.numerator.id === activeId) {
-          return { container: slot, index: i, item, role: "numerator" };
-        }
-        if (item.denominator.id === activeId) {
-          return { container: slot, index: i, item, role: "denominator" };
-        }
-        const r = walk(item.numerator) ?? walk(item.denominator);
-        if (r) return r;
-      } else if (item.kind === "root") {
-        if (item.index?.id === activeId) {
-          return { container: slot, index: i, item, role: "index" };
-        }
-        if (item.radicand.id === activeId) {
-          return { container: slot, index: i, item, role: "radicand" };
-        }
-        const r = (item.index ? walk(item.index) : null) ?? walk(item.radicand);
-        if (r) return r;
-      } else if (item.kind === "power") {
-        if (item.base.id === activeId) {
-          return { container: slot, index: i, item, role: "base" };
-        }
-        if (item.exponent.id === activeId) {
-          return { container: slot, index: i, item, role: "exponent" };
-        }
-        const r = walk(item.base) ?? walk(item.exponent);
+      if (item.kind === "token") continue;
+      const roles = slotRoles(item);
+      for (const [child, role] of roles) {
+        if (child.id === activeId) return { container: slot, index: i, item, role };
+      }
+      for (const [child] of roles) {
+        const r = walk(child);
         if (r) return r;
       }
     }
     return null;
   };
   return walk(root);
+}
+
+/** Every structure enclosing `slotId`, innermost first. */
+function ancestorRefs(root: Slot, slotId: SlotId): SlotParentRef[] {
+  const out: SlotParentRef[] = [];
+  let id = slotId;
+  for (;;) {
+    const ref = findSlotParent(root, id);
+    if (!ref) return out;
+    out.push(ref);
+    id = ref.container.id;
+  }
 }
 
 /** Remove the item at `index` from the slot named `containerId`. */
@@ -1069,4 +1187,400 @@ export function expressionTemplateSeedFromSkeleton(
     nextId,
     structureLocked: true,
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALGEBRA MODE
+//
+// The constrained pad above models "one number per box" and keeps operators out
+// on purpose (see `isInsertableChar`). Algebra mode is the generalisation that
+// note anticipated: operators are their own tokens, brackets are a structure
+// (so they can never be unbalanced), and a box holds a free run of terms. The
+// caller's checker owns whether the run is well formed; the editor only refuses
+// input it cannot represent and reports `""` (incomplete) for an answer that is
+// visibly unfinished.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Binary/sign operators. `-` doubles as the negative sign: context decides,
+ *  exactly as it does on paper, so the pad needs only one minus key. */
+const ALGEBRA_OPERATORS = new Set(["+", "-", "*", "±"]);
+
+function isOperatorItem(item: Item | undefined): boolean {
+  return !!item && item.kind === "token" && ALGEBRA_OPERATORS.has(item.value);
+}
+
+/** Map a typed character onto the token vocabulary, or null to refuse it. */
+function normalizeAlgebraChar(c: string): string | null {
+  if (c === "−" || c === "–") return "-";
+  if (c === "×" || c === "·" || c === "⋅") return "*";
+  if (/^[A-Z]$/.test(c)) return c.toLowerCase();
+  if (/^[0-9a-z.+\-*±π]$/.test(c)) return c;
+  return null;
+}
+
+/** A "simple" exponent — `2`, `10`, `n`, `-3` — the shape after which typing an
+ *  operator obviously means "and now back on the line" (x² + 3x). Anything
+ *  richer stays where it is, so 2^(x+1) is still typeable (with brackets). */
+function isSimpleExponent(items: Item[]): boolean {
+  const text = items.map((it) => (it.kind === "token" ? it.value : "\u0000")).join("");
+  return /^-?(?:[0-9.]+|[a-zπ])$/.test(text);
+}
+
+function algebraInsertChar(prev: ExpressionTemplateState, c: string): ExpressionTemplateState {
+  if (c === "(") return algebraOpenParen(prev);
+  if (c === ")") {
+    return algebraCloseGroup(prev, (ref) =>
+      ref.item.kind === "log" ? ref.role === "argument" : ref.item.kind === "group" && ref.item.fn !== "abs",
+    );
+  }
+  if (c === "|") return algebraAbsBar(prev);
+  const ch = normalizeAlgebraChar(c);
+  if (!ch) return prev;
+  const parent = findSlotParent(prev.root, prev.activeSlotId);
+  // A root's index stays an integer box.
+  if (parent?.item.kind === "root" && parent.role === "index" && !/^[0-9]$/.test(ch)) return prev;
+  let at: ExpressionTemplateState = prev;
+  if (
+    ALGEBRA_OPERATORS.has(ch) &&
+    parent?.item.kind === "power" &&
+    parent.role === "exponent" &&
+    prev.caretIndex === parent.item.exponent.items.length &&
+    isSimpleExponent(parent.item.exponent.items)
+  ) {
+    at = { ...prev, activeSlotId: parent.container.id, caretIndex: parent.index + 1 };
+  }
+  const state = { ...at, root: cloneSlot(at.root) };
+  state.root = mapSlot(state.root, at.activeSlotId, (slot) => ({
+    ...slot,
+    items: [
+      ...slot.items.slice(0, at.caretIndex),
+      { kind: "token" as const, value: ch },
+      ...slot.items.slice(at.caretIndex),
+    ],
+  }));
+  state.caretIndex = at.caretIndex + 1;
+  return state;
+}
+
+/** `(` opens a bracket — except in a log's base, where it means "base done,
+ *  now the argument" (log₂(…) is typed: log key, 2, then the bracket). */
+function algebraOpenParen(prev: ExpressionTemplateState): ExpressionTemplateState {
+  const parent = findSlotParent(prev.root, prev.activeSlotId);
+  if (parent?.item.kind === "log" && parent.role === "base") {
+    return { ...prev, activeSlotId: parent.item.argument.id, caretIndex: 0 };
+  }
+  return expressionTemplateInsertGroup(prev, "paren");
+}
+
+/** `)` (and a closing `|`) step the caret out past the nearest enclosing
+ *  structure `matches` accepts, from however deep inside it the caret is. */
+function algebraCloseGroup(
+  prev: ExpressionTemplateState,
+  matches: (ref: SlotParentRef) => boolean,
+): ExpressionTemplateState {
+  for (const ref of ancestorRefs(prev.root, prev.activeSlotId)) {
+    if (matches(ref)) return { ...prev, activeSlotId: ref.container.id, caretIndex: ref.index + 1 };
+  }
+  return prev;
+}
+
+/** `|` closes the absolute value the caret is at the end of, else opens one. */
+function algebraAbsBar(prev: ExpressionTemplateState): ExpressionTemplateState {
+  const parent = findSlotParent(prev.root, prev.activeSlotId);
+  if (
+    parent?.item.kind === "group" &&
+    parent.item.fn === "abs" &&
+    prev.caretIndex === parent.item.inner.items.length &&
+    parent.item.inner.items.length > 0
+  ) {
+    return { ...prev, activeSlotId: parent.container.id, caretIndex: parent.index + 1 };
+  }
+  return expressionTemplateInsertGroup(prev, "abs");
+}
+
+/** The whole TERM left of the caret — back to the nearest + − × ± — which a
+ *  typed `/` lifts into the numerator: `2x/` → 2x over ▢, `(x+1)/` → x+1 over ▢. */
+function algebraTermRun(slot: Slot, caretIndex: number): { items: Item[]; start: number } {
+  let start = caretIndex;
+  while (start > 0 && !isOperatorItem(slot.items[start - 1])) start -= 1;
+  return { items: slot.items.slice(start, caretIndex), start };
+}
+
+/** The single OPERAND left of the caret, which `^` raises: a digit run, one
+ *  letter, or one structure. `2x^` raises only the x. */
+function algebraAtomRun(slot: Slot, caretIndex: number): { items: Item[]; start: number } {
+  const none = { items: [] as Item[], start: caretIndex };
+  if (caretIndex === 0) return none;
+  const left = slot.items[caretIndex - 1];
+  if (left.kind !== "token") return { items: [left], start: caretIndex - 1 };
+  if (/^[0-9.]$/.test(left.value)) {
+    let start = caretIndex - 1;
+    while (start > 0) {
+      const it = slot.items[start - 1];
+      if (it.kind !== "token" || !/^[0-9.]$/.test(it.value)) break;
+      start -= 1;
+    }
+    return { items: slot.items.slice(start, caretIndex), start };
+  }
+  if (/^[a-zπ]$/.test(left.value)) return { items: [left], start: caretIndex - 1 };
+  return none;
+}
+
+type AlgebraGrab = "none" | "term" | "atom";
+
+/** Splice a freshly built structure in at the caret, optionally lifting the
+ *  operand to its left into it, and put the caret where `build` says. */
+function algebraInsertBuilt(
+  prev: ExpressionTemplateState,
+  grab: AlgebraGrab,
+  build: (
+    state: ExpressionTemplateState,
+    grabbed: Item[],
+  ) => { item: Item; focus: Slot | "after" },
+): ExpressionTemplateState {
+  const active = findSlot(prev.root, prev.activeSlotId);
+  if (!active) return prev;
+  const parent = findSlotParent(prev.root, prev.activeSlotId);
+  if (parent?.item.kind === "root" && parent.role === "index") return prev;
+  const run =
+    grab === "term"
+      ? algebraTermRun(active, prev.caretIndex)
+      : grab === "atom"
+        ? algebraAtomRun(active, prev.caretIndex)
+        : { items: [] as Item[], start: prev.caretIndex };
+  const state = { ...prev, root: cloneSlot(prev.root) };
+  const built = build(state, run.items.map(cloneItem));
+  state.root = mapSlot(state.root, prev.activeSlotId, (slot) => {
+    const items = [...slot.items];
+    items.splice(run.start, run.items.length, built.item);
+    return { ...slot, items };
+  });
+  if (built.focus === "after") {
+    state.activeSlotId = prev.activeSlotId;
+    state.caretIndex = run.start + 1;
+  } else {
+    state.activeSlotId = built.focus.id;
+    state.caretIndex = built.focus.items.length;
+  }
+  return state;
+}
+
+function algebraInsertFraction(prev: ExpressionTemplateState, grab: boolean): ExpressionTemplateState {
+  return algebraInsertBuilt(prev, grab ? "term" : "none", (state, grabbed) => {
+    const numerator = newSlot(state);
+    const denominator = newSlot(state);
+    // A bracketed term loses its brackets on the way up: the fraction bar
+    // already groups it ((x+1)/ → x+1 over ▢).
+    const only = grabbed.length === 1 ? grabbed[0] : null;
+    numerator.items = only?.kind === "group" && only.fn === "paren" ? only.inner.items : grabbed;
+    return {
+      item: { kind: "fraction", numerator, denominator },
+      focus: grabbed.length > 0 ? denominator : numerator,
+    };
+  });
+}
+
+/** `^` (exponentText = null) or `x²` (exponentText = "2"). `^` right after a
+ *  power re-enters that power's exponent instead of stacking a tower. */
+function algebraInsertPower(prev: ExpressionTemplateState, exponentText: string | null): ExpressionTemplateState {
+  const active = findSlot(prev.root, prev.activeSlotId);
+  if (exponentText === null && active && prev.caretIndex > 0) {
+    const left = active.items[prev.caretIndex - 1];
+    if (left.kind === "power") {
+      return { ...prev, activeSlotId: left.exponent.id, caretIndex: left.exponent.items.length };
+    }
+  }
+  return algebraInsertBuilt(prev, "atom", (state, grabbed) => {
+    const base = newSlot(state);
+    const exponent = newSlot(state);
+    base.items = grabbed;
+    if (exponentText !== null) {
+      exponent.items = exponentText.split("").map((value) => ({ kind: "token" as const, value }));
+    }
+    const focus: Slot | "after" =
+      exponentText !== null ? (grabbed.length > 0 ? "after" : base) : grabbed.length > 0 ? exponent : base;
+    return { item: { kind: "power", base, exponent }, focus };
+  });
+}
+
+function algebraInsertRoot(prev: ExpressionTemplateState, rootMode: "explicit" | "implicit"): ExpressionTemplateState {
+  return algebraInsertBuilt(prev, "none", (state) => {
+    const index = rootMode === "explicit" ? newSlot(state) : null;
+    const radicand = newSlot(state);
+    return { item: { kind: "root", index, radicand }, focus: index ?? radicand };
+  });
+}
+
+/** Whether a box is visibly unfinished: a run that ends on an operator (`x +`),
+ *  starts on a binary one (`+ x`), or has two binary operators in a row
+ *  (`x + × 2`). A sign after an operator (`x × −2`, `3 ± −1`) is fine. */
+function algebraRunIsUnfinished(items: Item[]): boolean {
+  const first = items[0];
+  if (first && first.kind === "token" && (first.value === "+" || first.value === "*")) return true;
+  if (isOperatorItem(items[items.length - 1])) return true;
+  for (let i = 1; i < items.length; i++) {
+    const cur = items[i];
+    if (isOperatorItem(items[i - 1]) && isOperatorItem(cur) && (cur as TokenItem).value !== "-") return true;
+  }
+  return false;
+}
+
+function algebraSlotHasHoles(slot: Slot, required = true): boolean {
+  if (slot.items.length === 0) return required;
+  if (algebraRunIsUnfinished(slot.items)) return true;
+  for (const item of slot.items) {
+    if (item.kind === "token") continue;
+    if (item.kind === "root") {
+      if (!rootIndexValue(item) || algebraSlotHasHoles(item.radicand)) return true;
+      continue;
+    }
+    if (item.kind === "log") {
+      // An empty base is deliberate: base 10.
+      if (algebraSlotHasHoles(item.base, false) || algebraSlotHasHoles(item.argument)) return true;
+      continue;
+    }
+    for (const child of itemSlots(item)) if (algebraSlotHasHoles(child)) return true;
+  }
+  return false;
+}
+
+/** A box whose serialization needs no brackets as a fraction side, a root's
+ *  radicand or an exponent: one number, or one letter. */
+function isBareAtom(slot: Slot): boolean {
+  const text = slotText(slot);
+  return /^(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+|[a-zπ])$/.test(text);
+}
+
+/** A fraction side, exponent or radicand the learner already bracketed. */
+function isBareOperand(slot: Slot): boolean {
+  if (isBareAtom(slot)) return true;
+  const only = slot.items.length === 1 ? slot.items[0] : null;
+  return only?.kind === "group" && only.fn === "paren";
+}
+
+/** A power's base can also stay bare when it is ONE bracket, ln or |…| group. */
+function isBareBase(slot: Slot): boolean {
+  if (isBareAtom(slot)) return true;
+  return slot.items.length === 1 && slot.items[0].kind === "group";
+}
+
+function wrapUnless(bare: boolean, s: string): string {
+  return bare ? s : `(${s})`;
+}
+
+function algebraItemToExpr(item: Exclude<Item, TokenItem>): string {
+  switch (item.kind) {
+    case "fraction":
+      return `${wrapUnless(isBareOperand(item.numerator), algebraSlotToExpr(item.numerator))}/${wrapUnless(
+        isBareOperand(item.denominator),
+        algebraSlotToExpr(item.denominator),
+      )}`;
+    case "power":
+      return `${wrapUnless(isBareBase(item.base), algebraSlotToExpr(item.base))}^${wrapUnless(
+        isBareOperand(item.exponent),
+        algebraSlotToExpr(item.exponent),
+      )}`;
+    case "root": {
+      const index = rootIndexValue(item) ?? 2;
+      // Only a plain number rides bare (`2√3`); every other radicand gets
+      // explicit brackets, so a checker never has to guess a root's reach.
+      const only = item.radicand.items.length === 1 ? item.radicand.items[0] : null;
+      const radicand =
+        only?.kind === "group" && only.fn === "paren"
+          ? algebraSlotToExpr(only.inner)
+          : algebraSlotToExpr(item.radicand);
+      return `${rootSymbol(index)}${wrapUnless(/^[0-9]+(?:\.[0-9]+)?$/.test(radicand), radicand)}`;
+    }
+    case "log": {
+      const arg = algebraSlotToExpr(item.argument);
+      if (item.base.items.length === 0) return `log(${arg})`;
+      return `log_${wrapUnless(isBareAtom(item.base), algebraSlotToExpr(item.base))}(${arg})`;
+    }
+    case "group": {
+      const inner = algebraSlotToExpr(item.inner);
+      if (item.fn === "ln") return `ln(${inner})`;
+      if (item.fn === "abs") return `abs(${inner})`;
+      return `(${inner})`;
+    }
+  }
+}
+
+/** A whole-number run at the start of a box followed directly by a simple
+ *  numeric fraction (and then nothing, or an operator) is a MIXED NUMBER, the
+ *  way it looks on screen: `2 1/2`. Anywhere else, side by side means times. */
+function isAlgebraMixedNumber(items: Item[], i: number): boolean {
+  const item = items[i];
+  if (item.kind !== "fraction" || i === 0) return false;
+  if (!/^[0-9]+$/.test(slotText(item.numerator)) || !/^[0-9]+$/.test(slotText(item.denominator))) return false;
+  for (let j = 0; j < i; j++) {
+    const it = items[j];
+    if (it.kind !== "token" || !/^[0-9]$/.test(it.value)) return false;
+  }
+  const next = items[i + 1];
+  return !next || isOperatorItem(next);
+}
+
+/** The text of an all-token box ("" when it holds a structure). */
+function slotText(slot: Slot): string {
+  return slot.items.every((it) => it.kind === "token")
+    ? slot.items.map((it) => (it as TokenItem).value).join("")
+    : "";
+}
+
+/**
+ * Serialize an algebra box to a plain ASCII answer string (`(x+3)(x-2)`,
+ * `log_2(x+1)`, `x^(2/3)`, `2√3`, `3±2i`). The output is
+ * deliberately unambiguous rather than minimal: brackets appear wherever a
+ * fraction, power or root meets a neighbour that could otherwise be read into
+ * it, and an explicit `*` separates two numbers (`x^2*3`), two letters, a
+ * letter and a following number, or anything that follows a power or root
+ * (`√3*x`), so no reading of implicit multiplication can change the value the
+ * learner built.
+ */
+function algebraSlotToExpr(slot: Slot): string {
+  const items = slot.items;
+  let out = "";
+  let prevItem: Item | undefined;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (isAlgebraMixedNumber(items, i)) {
+      const frac = item as FractionItem;
+      out += ` ${slotText(frac.numerator)}/${slotText(frac.denominator)}`;
+      prevItem = item;
+      continue;
+    }
+    let piece: string;
+    if (item.kind === "token") {
+      piece = item.value;
+    } else {
+      piece = algebraItemToExpr(item);
+      if (item.kind === "fraction") {
+        const before = items[i - 1];
+        const after = items[i + 1];
+        const isolated = (!before || isOperatorItem(before)) && (!after || isOperatorItem(after));
+        if (!isolated) piece = `(${piece})`;
+      }
+    }
+    out = joinAlgebra(out, piece, prevItem, item);
+    prevItem = item;
+  }
+  return out;
+}
+
+function joinAlgebra(out: string, piece: string, prevItem: Item | undefined, item: Item): string {
+  if (!out || !prevItem) return out + piece;
+  if (isOperatorItem(prevItem) || isOperatorItem(item)) return out + piece;
+  const l = out[out.length - 1];
+  const r = piece[0];
+  if (prevItem.kind === "token" && item.kind === "token") {
+    // Characters of one number join (`12`, `0.5`) and a coefficient joins its
+    // letter (`2x`); two letters, or a letter then a digit, get an explicit ×.
+    return /[a-zπ]/.test(l) && /[0-9a-zπ]/.test(r) ? `${out}*${piece}` : out + piece;
+  }
+  const needsTimes =
+    prevItem.kind === "power" ||
+    prevItem.kind === "root" ||
+    (/[0-9.]/.test(r) && /[0-9.a-zπ)]/.test(l)) ||
+    (/[a-zπ]/.test(r) && /[a-zπ]/.test(l));
+  return needsTimes ? `${out}*${piece}` : out + piece;
 }

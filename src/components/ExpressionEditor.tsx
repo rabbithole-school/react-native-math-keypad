@@ -1,11 +1,15 @@
 import { memo, useEffect, useRef, useState, type ReactNode } from "react";
-import { Animated, Pressable, StyleSheet, Text, useAnimatedValue, View } from "react-native";
+import { Animated, Pressable, StyleSheet, Text, View } from "react-native";
 import Svg, { Path } from "react-native-svg";
+import { useStableAnimatedValue } from "./useStableAnimatedValue";
 
 import { useMathKeypadTheme, type MathKeypadTheme, type MathKeypadThemeOverride } from "../theme";
+import { itemSlots } from "../model/expressionTemplate";
 import type {
   ExpressionTemplateState,
+  GroupItem,
   Item,
+  LogItem,
   Slot,
   SlotId,
 } from "../model/expressionTemplate";
@@ -81,11 +85,44 @@ type Ctx = {
   /** When false (feedback / disabled), boxes are inert: no caret, no accent focus,
    *  and taps don't move the bar — the accent must only ever mean "you can type here." */
   interactive: boolean;
+  /** Algebra mode: operators get math spacing and glyphs (− ×), letters are
+   *  set in italic. The constrained number pad keeps its upright digits. */
+  algebra: boolean;
+  /** Algebra: the boxes of every structure the caret is inside. Only these
+   *  (and empty boxes) draw an outline; finished structures elsewhere read as
+   *  plain math rather than a row of rounded boxes. */
+  focus: Set<SlotId>;
 };
+
+/** The boxes of each structure that encloses the caret's box. */
+function focusedSlots(root: Slot, activeId: SlotId): Set<SlotId> {
+  const out = new Set<SlotId>();
+  const walk = (slot: Slot): boolean => {
+    if (slot.id === activeId) return true;
+    for (const item of slot.items) {
+      const boxes = itemSlots(item);
+      if (boxes.some(walk)) {
+        for (const box of boxes) out.add(box.id);
+        return true;
+      }
+    }
+    return false;
+  };
+  walk(root);
+  return out;
+}
+
+/** How an algebra token is drawn: the glyph, and whether it is an operator
+ *  (spaced), a letter (italic) or a number. */
+const OPERATOR_GLYPH: Record<string, string> = { "+": "+", "-": "\u2212", "*": "\u00d7", "±": "\u00b1" };
+
+function isOperatorToken(item: Item | undefined): boolean {
+  return !!item && item.kind === "token" && item.value in OPERATOR_GLYPH;
+}
 
 /** The blinking insertion bar, sized to the local font. */
 function Caret({ fontSize, color }: { fontSize: number; color: string }) {
-  const opacity = useAnimatedValue(1);
+  const opacity = useStableAnimatedValue(1);
   useEffect(() => {
     const loop = Animated.loop(
       Animated.sequence([
@@ -118,6 +155,21 @@ function Caret({ fontSize, color }: { fontSize: number; color: string }) {
   );
 }
 
+/** The editor's upright face: the theme's font, or the system font at 500. */
+function editorFont(theme: MathKeypadTheme) {
+  return theme.fonts.editor
+    ? { fontFamily: theme.fonts.editor }
+    : { fontWeight: "500" as const };
+}
+
+/** Variables in algebra mode. A custom font needs its real italic face named
+ *  (`fonts.editorItalic`): iOS draws a custom family upright when asked for
+ *  `fontStyle: "italic"` without one. The system font slants on its own. */
+function italicFont(theme: MathKeypadTheme) {
+  if (theme.fonts.editorItalic) return { fontFamily: theme.fonts.editorItalic };
+  return { ...editorFont(theme), fontStyle: "italic" as const };
+}
+
 /** A single glyph (one character of a token run). Tapping its left/right half
  *  places the caret before/after it. */
 function GlyphView({
@@ -125,27 +177,37 @@ function GlyphView({
   slotId,
   index,
   ctx,
+  unary = false,
 }: {
   value: string;
   slotId: SlotId;
   index: number;
   ctx: Ctx;
+  /** Algebra: a minus/plus that is a SIGN (first in its box, or right after
+   *  another operator) sits tight against what follows, unspaced. */
+  unary?: boolean;
 }) {
   const widthRef = useRef(0);
+  const operator = ctx.algebra && value in OPERATOR_GLYPH;
+  const letter = ctx.algebra && /^[a-z]$/.test(value);
+  const gap = operator && !unary ? Math.round(ctx.fontSize * 0.2) : 0;
   const text = (
     <Text
       onLayout={(e) => {
         widthRef.current = e.nativeEvent.layout.width;
       }}
       style={{
-        fontFamily: ctx.theme.fonts.editor,
-        fontWeight: ctx.theme.fonts.editor ? undefined : "500",
+        ...(letter ? italicFont(ctx.theme) : editorFont(ctx.theme)),
         fontSize: ctx.fontSize,
         lineHeight: ctx.fontSize * EXPR_GLYPH_LINE_HEIGHT,
         color: ctx.theme.colors.ink,
+        ...(gap ? { marginHorizontal: gap } : null),
+        // The italic face leans out of its advance box; a hair of room keeps
+        // the next glyph (or the caret) from touching it.
+        ...(letter ? { paddingRight: 1 } : null),
       }}
     >
-      {value}
+      {operator ? OPERATOR_GLYPH[value] : value}
     </Text>
   );
   if (!ctx.interactive) return text;
@@ -172,13 +234,26 @@ function slotChildren(slot: Slot, ctx: Ctx): ReactNode[] {
     const item = slot.items[i];
     if (!item) continue;
     if (item.kind === "token") {
-      out.push(<GlyphView key={`i${i}`} value={item.value} slotId={slot.id} index={i} ctx={ctx} />);
+      out.push(
+        <GlyphView
+          key={`i${i}`}
+          value={item.value}
+          slotId={slot.id}
+          index={i}
+          ctx={ctx}
+          unary={i === 0 || isOperatorToken(slot.items[i - 1])}
+        />,
+      );
     } else if (item.kind === "fraction") {
       out.push(<FractionView key={`i${i}`} item={item} ctx={ctx} />);
     } else if (item.kind === "root") {
       out.push(<RootView key={`i${i}`} item={item} ctx={ctx} />);
-    } else {
+    } else if (item.kind === "power") {
       out.push(<PowerView key={`i${i}`} item={item} ctx={ctx} />);
+    } else if (item.kind === "log") {
+      out.push(<LogView key={`i${i}`} item={item} ctx={ctx} />);
+    } else {
+      out.push(<GroupView key={`i${i}`} item={item} ctx={ctx} />);
     }
   }
   return out;
@@ -240,7 +315,13 @@ function BoxSlot({ slot, ctx }: { slot: Slot; ctx: Ctx }) {
           minWidth,
           minHeight,
           borderWidth: bw,
-          borderColor: invalidRootIndex ? ctx.theme.colors.danger : active ? ctx.theme.colors.accent : ctx.theme.colors.emptyBox,
+          borderColor: invalidRootIndex
+            ? ctx.theme.colors.danger
+            : active
+              ? ctx.theme.colors.accent
+              : ctx.algebra && !empty && !ctx.focus.has(slot.id)
+                ? "transparent"
+                : ctx.theme.colors.emptyBox,
           backgroundColor: invalidRootIndex ? `${ctx.theme.colors.danger}1a` : active ? ctx.theme.colors.accentSubtle : "transparent",
           borderStyle: compact ? "dotted" : empty ? "dashed" : "solid",
         },
@@ -447,6 +528,107 @@ function RootView({
   );
 }
 
+/** A stretchy delimiter drawn to the height of what it encloses: a bracket
+ *  curve, or a straight bar for |…|. A font glyph would stay one line tall
+ *  around a fraction. */
+function Delimiter({
+  shape,
+  height,
+  ctx,
+}: {
+  shape: "open" | "close" | "bar";
+  height: number;
+  ctx: Ctx;
+}) {
+  const h = Math.max(Math.round(ctx.fontSize * 1.15), Math.round(height));
+  const w = shape === "bar" ? Math.max(6, Math.round(ctx.fontSize * 0.28)) : Math.max(7, Math.round(h * 0.2));
+  const stroke = Math.max(1.6, ctx.fontSize * 0.075);
+  const d =
+    shape === "bar"
+      ? `M ${w / 2} 1 L ${w / 2} ${h - 1}`
+      : shape === "open"
+        ? `M ${w - 1} 1 Q 1 ${h / 2} ${w - 1} ${h - 1}`
+        : `M 1 1 Q ${w - 1} ${h / 2} 1 ${h - 1}`;
+  return (
+    <Svg accessible={false} width={w} height={h} viewBox={`0 0 ${w} ${h}`} pointerEvents="none">
+      <Path d={d} fill="none" stroke={ctx.theme.colors.ink} strokeWidth={stroke} strokeLinecap="round" />
+    </Svg>
+  );
+}
+
+/** A box between two delimiters that grow with it. */
+function Enclosed({
+  slot,
+  ctx,
+  bars = false,
+}: {
+  slot: Slot;
+  ctx: Ctx;
+  bars?: boolean;
+}) {
+  const [height, setHeight] = useState(0);
+  return (
+    <View style={styles.enclosed}>
+      <Delimiter shape={bars ? "bar" : "open"} height={height} ctx={ctx} />
+      <View
+        onLayout={(event) => {
+          const next = Math.ceil(event.nativeEvent.layout.height);
+          if (Math.abs(next - height) > 0.5) setHeight(next);
+        }}
+      >
+        <SlotView slot={slot} ctx={ctx} />
+      </View>
+      <Delimiter shape={bars ? "bar" : "close"} height={height} ctx={ctx} />
+    </View>
+  );
+}
+
+function Word({ text, ctx }: { text: string; ctx: Ctx }) {
+  return (
+    <Text
+      style={{
+        ...editorFont(ctx.theme),
+        fontSize: ctx.fontSize,
+        lineHeight: ctx.fontSize * EXPR_GLYPH_LINE_HEIGHT,
+        color: ctx.theme.colors.ink,
+        marginRight: 1,
+      }}
+    >
+      {text}
+    </Text>
+  );
+}
+
+/** `(▢)`, `ln(▢)` or `|▢|`. */
+function GroupView({ item, ctx }: { item: GroupItem; ctx: Ctx }) {
+  return (
+    <View style={styles.enclosed}>
+      {item.fn === "ln" ? <Word text="ln" ctx={ctx} /> : null}
+      <Enclosed slot={item.inner} ctx={ctx} bars={item.fn === "abs"} />
+    </View>
+  );
+}
+
+/** `log` with a lowered subscript base box, then its bracketed argument. In
+ *  read-only feedback an empty base (base 10) simply disappears. */
+function LogView({ item, ctx }: { item: LogItem; ctx: Ctx }) {
+  const baseFont = Math.max(12, Math.round(ctx.fontSize * 0.62));
+  const showBase = ctx.interactive || item.base.items.length > 0;
+  return (
+    <View style={styles.enclosed}>
+      <Word text="log" ctx={ctx} />
+      {showBase ? (
+        <View style={{ marginTop: Math.round(ctx.fontSize * 0.75), marginRight: 1 }}>
+          <SlotView slot={item.base} ctx={scaled(ctx, baseFont)} />
+        </View>
+      ) : null}
+      <Enclosed slot={item.argument} ctx={ctx} />
+    </View>
+  );
+}
+
+const EMPTY_FOCUS = new Set<SlotId>();
+
 export const ExpressionEditor = memo(function ExpressionEditor({
   state,
   onSetCaret,
@@ -470,6 +652,8 @@ export const ExpressionEditor = memo(function ExpressionEditor({
     theme,
     fontSize,
     interactive,
+    algebra: state.mode === "algebra",
+    focus: state.mode === "algebra" ? focusedSlots(state.root, state.activeSlotId) : EMPTY_FOCUS,
   };
   return (
     <View style={styles.root} accessibilityLabel="Answer builder">
@@ -533,5 +717,9 @@ const styles = StyleSheet.create({
   },
   exponent: {
     marginLeft: 1,
+  },
+  enclosed: {
+    flexDirection: "row",
+    alignItems: "center",
   },
 });
